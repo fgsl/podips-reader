@@ -121,7 +121,7 @@ func listEvents(w watch.Interface) {
             } else {
                 fmt.Println("PODIPS-READER: Has connectivity with " + activemqServer)
             }
-	    err = conn.Send(
+	        err = conn.Send(
                 "/queue/pods",// destination
                  "application/json",// content-type
                 []byte(data))// body
@@ -295,12 +295,16 @@ func getDataForLog(podInfo PodInfo) string {
         hostname := ""
      _ = hostname
     }
+    logdc := "unknown"
+    if os.Getenv("LOG_DC") != "" {
+        logdc = os.Getenv("LOG_DC")
+    }    
     now := time.Now()
     data = "{" +
         "\"class\": \"audit\"," +
         "\"subclass\": \"pod_ip\"," +
         "\"origin\":\"" +  hostname + "\"," +
-        "\"dc\":\"spo\"," +
+        "\"dc\":\"" + logdc + "\"," +
         "\"host\":\"" +  hostname + "\"," +
         "\"pod_namespace\":\"" + podInfo.objectNamespace + "\"," +
         "\"pod\":\"" + podInfo.objectName + "\"," +

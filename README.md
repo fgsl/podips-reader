@@ -4,4 +4,4 @@ This program reads logs about changes of pods in a Kubernetes cluster and send t
 
 This program was made to be used with **podips-writer** and **podips-monitor**.
 
-This program was made to run inside a Kubernetes pod. Use the Dockerfile to create the pod image. 
+This program was made to run inside a Kubernetes pod. Use a Dockerfile to create the pod image. 

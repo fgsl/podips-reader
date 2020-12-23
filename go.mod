@@ -5,7 +5,7 @@ go 1.14
 require (
 	github.com/elazarl/goproxy v0.0.0-20180725130230-947c36da3153 // indirect
 	github.com/fsnotify/fsnotify v1.4.9 // indirect
-	github.com/go-stomp/stomp v2.0.6+incompatible // indirect
+	github.com/go-stomp/stomp v2.0.6+incompatible
 	github.com/gogo/protobuf v1.3.1 // indirect
 	github.com/golang/protobuf v1.3.3 // indirect
 	github.com/google/go-cmp v0.4.0 // indirect

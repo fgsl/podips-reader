@@ -7,11 +7,12 @@ package main
 
 import (
     "crypto/tls"
+    "database/sql"
     "flag"
     "fmt"
     "io/ioutil"
     "net/http"
-    "os"    
+    "os"
     "path/filepath"
     "strconv"
     "strings"
@@ -24,6 +25,7 @@ import (
     "k8s.io/client-go/rest"
     "k8s.io/client-go/tools/clientcmd"
     stomp "github.com/go-stomp/stomp"
+    "gopkg.in/ini.v1"
 )
 
 type PodInfo struct {
@@ -42,7 +44,7 @@ type PodInfo struct {
 
 func main() {
     fmt.Println("PODIPS-READER: initializing audit for Kubernetes Pods")
-    fmt.Println("PODIPS-READER: version 1.0.0")
+    fmt.Println("PODIPS-READER: version 1.1.0")
     options := getOptions()
 
     config := getConfig(options)
@@ -78,6 +80,7 @@ func main() {
             }
             os.Remove("/tmp/kubernetes_status")		
         }
+        readMessagesFromDatabase()
 
         time.Sleep(10 * time.Second)
     }
@@ -87,7 +90,7 @@ func listEvents(w watch.Interface) {
     var pods = make(map[string]string)
     var data string
     var podInfo PodInfo
-    var conn *stomp.Conn
+    var queue *stomp.Conn
     var err error
 
     for event := range w.ResultChan() {
@@ -106,22 +109,8 @@ func listEvents(w watch.Interface) {
         if podInfo.sendLog {
             data = getDataForLog(podInfo)
 
-            activemqHost := "podips-queue"
-            if os.Getenv("QUEUE_HOST") != "" {
-               activemqHost = os.Getenv("QUEUE_HOST")
-            }
-            activemqPort := "61616"
-            if os.Getenv("QUEUE_PORT") != "" {
-                activemqPort = os.Getenv("QUEUE_PORT")
-            }
-            activemqServer := activemqHost + ":" + activemqPort
-            conn, err = stomp.Dial("tcp", activemqServer,stomp.ConnOpt.Login(os.Getenv("QUEUE_USERNAME"), os.Getenv("QUEUE_PASSWORD")))
-            if err != nil {
-                fmt.Println("ERROR: stomp.Dial: " + err.Error())
-            } else {
-                fmt.Println("PODIPS-READER: Has connectivity with " + activemqServer)
-            }
-	        err = conn.Send(
+            queue, err = getQueue()
+	        err = queue.Send(
                 "/queue/pods",// destination
                  "application/json",// content-type
                 []byte(data))// body
@@ -134,6 +123,7 @@ func listEvents(w watch.Interface) {
                     fmt.Println("PODIPS-READER MONITOR: WARNING: ", err.Error())
                 }
                 os.Remove("/tmp/queue_status")
+                saveMessageToDatabase(data)
             } else {
                 http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}    
                 resp, err := http.Get(getPodipsHost() + "/queue/write/200/success")
@@ -141,9 +131,9 @@ func listEvents(w watch.Interface) {
                 if err != nil {
                     fmt.Println("PODIPS-READER MONITOR: WARNING: ", err.Error())
                 }
-		os.Create("/tmp/queue_status")            
+		        os.Create("/tmp/queue_status")            
             }
-            conn.Disconnect()
+            queue.Disconnect()
         }
 
         msg := "(send? " + strconv.FormatBool(podInfo.sendLog) + ")" + data
@@ -331,6 +321,126 @@ func getPodipsHost() string {
     return podipsHost
 }
 
+func getQueue() (*stomp.Conn, error) {
+    queueHost := "podips-queue"
+    if os.Getenv("QUEUE_HOST") != "" {
+        queueHost = os.Getenv("QUEUE_HOST")
+    }
+    queuePort := "61616"
+    if os.Getenv("QUEUE_PORT") != "" {
+        queuePort = os.Getenv("QUEUE_PORT")
+    }
+    queueUsername := ""
+    if os.Getenv("QUEUE_USERNAME") != "" {
+        queueUsername = os.Getenv("QUEUE_USERNAME")
+    }
+    queuePassword := ""
+    if os.Getenv("QUEUE_PASSWORD") != "" {
+        queuePassword = os.Getenv("QUEUE_PASSWORD")
+    }
+    queueServer := queueHost + ":" + queuePort
+    queue, err := stomp.Dial("tcp", queueServer,stomp.ConnOpt.Login(queueUsername, queuePassword))
+    if err != nil {
+        fmt.Println("ERROR: stomp.Dial: " + err.Error())
+    } else {
+        fmt.Println("PODIPS-READER: Has connectivity with " + queueServer)
+    }    
+    return queue, err
+}
+
+func getDb() (*sql.DB, error) {
+    var dataSourceName string
+    var db *sql.DB
+    
+    cfg, err := ini.Load("dbconfig.ini")
+    if err != nil {
+        return db, err
+    }
+    driver := cfg.Section("").Key("driver").String()
+    host := cfg.Section("").Key("host").String()
+    port := cfg.Section("").Key("port").String()
+    user := cfg.Section("").Key("user").String()
+    password := cfg.Section("").Key("password").String()
+    dbName := cfg.Section("").Key("dbName").String()
+    dataSourceName = fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", host, port, user, password, dbName)    
+    db, err = sql.Open(driver,dataSourceName)
+    return db,err
+}
+
+func saveMessageToDatabase(message string) {
+    sqlStatement := fmt.Sprintf("INSERT INTO messages(message) VALUES ($1)")
+
+    db, err := getDb()
+    if err != nil {
+        return  
+    }
+     
+    insert, err := db.Prepare(sqlStatement)
+    if err != nil {
+        return
+    }
+
+    result, err := insert.Exec(message)
+    checkError(err)
+
+    if err == nil {
+        affect, err := result.RowsAffected()
+        checkError(err)
+        if err == nil {
+            fmt.Println(affect," message(s) saved into database")
+            db.Close()
+        }    
+    }
+}
+
+func readMessagesFromDatabase() {
+    db, err := getDb()
+    if err != nil {
+        return  
+    }
+    
+    sqlStatement, err := db.Query("SELECT id, message FROM messages")
+    if err != nil {
+        fmt.Println(err.Error())
+        return
+    }
+
+    queue, err := getQueue()
+    for sqlStatement.Next() {
+
+        var id int
+        var message string
+
+        err = sqlStatement.Scan(&id, &message)
+        if err == nil {
+            continue
+        }
+        err = queue.Send(
+            "/queue/pods",// destination
+            "application/json",// content-type
+            []byte(message))// body
+        if err != nil {
+            fmt.Println("ERROR WHEN SENDING TO QUEUE " + err.Error())
+        } else {
+            sqlStatement := fmt.Sprintf("delete from messages where id=$1")
+
+            delete, err := db.Prepare(sqlStatement)        
+            if err != nil {
+                continue
+            }
+            result, err := delete.Exec(id) // worst case, message will be replicate in queue
+            if err != nil {
+                affect, err := result.RowsAffected()
+                fmt.Println(affect, " message deleted from table messages")
+                checkError(err)
+            }
+        }       
+
+        fmt.Printf("From database: %d\t%s\n", id, message)
+    }
+    queue.Disconnect()    
+}
+
 func homeDir() string {
     if h := os.Getenv("HOME"); h != "" {
         return h
@@ -347,6 +457,12 @@ func die(text string) {
 // use this for aborting the program
 func inPanic(err error) {
     if err != nil {
-        panic("FATAL ERROR" + err.Error())
+        panic("FATAL ERROR " + err.Error())
+    }
+}
+
+func checkError(err error) {
+    if err != nil {
+        fmt.Println("ERROR " + err.Error())
     }
 }
